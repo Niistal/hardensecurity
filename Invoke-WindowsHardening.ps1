@@ -1,88 +1,116 @@
 <#
 .SYNOPSIS
-    Instalador Local (Mismo Directorio).
-    Busca el paquete .zip/.nupkg en la carpeta actual, lo instala y ejecuta.
+    Automated Windows Defensive Hardening Orchestrator.
+    Integrates and executes the Harden-Windows-Security baseline module.
+
+.DESCRIPTION
+    Safely unpacks, validates, and runs system hardening categories according to
+    Microsoft Security Baselines and Attack Surface Reduction (ASR) rules.
+    Runs in AuditOnly mode by default to prevent accidental configuration changes.
+
+.PARAMETER AuditOnly
+    Runs verification and compliance checking without making system modifications (Default: $true).
+
+.PARAMETER Apply
+    Enforces hardening rules on the host operating system. Requires elevation and System Restore.
+
+.EXAMPLE
+    .\Invoke-WindowsHardening.ps1
+    Runs compliance audit mode by default.
+
+.EXAMPLE
+    .\Invoke-WindowsHardening.ps1 -Apply
+    Applies defensive hardening baselines.
 #>
 
 [CmdletBinding()]
-param([switch]$AuditOnly = $false)
+param(
+    [switch]$AuditOnly = $true,
+    [switch]$Apply = $false
+)
+
 $ErrorActionPreference = "Stop"
 
-# --- 1. CONFIGURACIÓN ---
-# Usamos la ruta donde está el script, no el Escritorio
+# If -Apply is explicitly passed, disable AuditOnly
+if ($Apply) {
+    $AuditOnly = $false
+}
+
+# --- 1. CONFIGURATION ---
 $CurrentDir = $PSScriptRoot 
-if (-not $CurrentDir) { $CurrentDir = Get-Location } # Fallback si se ejecuta copy-paste
+if (-not $CurrentDir) { $CurrentDir = Get-Location }
 
 $InstallPath = "$env:USERPROFILE\Documents\PowerShell\Modules\Harden-Windows-Security"
 $TempDir = "C:\Temp_HWS_Local"
+$LogPath = "C:\Logs\Hardening"
 
-# Clear-Host
-Write-Host "--- INSTALADOR LOCAL (SAME FOLDER) ---" -ForegroundColor Yellow
-Write-Host "Buscando paquete en: $CurrentDir" -ForegroundColor Cyan
+if (-not (Test-Path $LogPath)) {
+    New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
+}
 
-# --- 2. BUSCAR EL PAQUETE ---
-# Buscamos cualquier zip o nupkg grande (>500KB) en la carpeta actual
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "  Windows Security Hardening Orchestrator — Defensive Baseline  " -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+if ($AuditOnly) {
+    Write-Host "  MODE: AUDIT ONLY (Safe inspection mode — no mutations made)   " -ForegroundColor Green
+} else {
+    Write-Host "  MODE: APPLY ENFORCEMENT (System changes will be written)     " -ForegroundColor Yellow
+}
+Write-Host "  Log Directory: $LogPath" -ForegroundColor DarkGray
+Write-Host "----------------------------------------------------------------"
+
+# --- 2. LOCATE PACKAGE ---
 $Package = Get-ChildItem -Path $CurrentDir -Include "*.zip", "*.nupkg" -Recurse -Depth 0 | 
-Where-Object { $_.Length -gt 20000 } | 
-Select-Object -First 1
+    Where-Object { $_.Length -gt 20000 } | 
+    Select-Object -First 1
 
 if (-not $Package) {
-    # [console]::Beep(500,300)
-    Write-Host "ERROR: No encuentro el archivo del módulo aquí." -ForegroundColor Red
-    Write-Host "--------------------------------------------------------"
-    Write-Host "1. Descarga el archivo de: https://www.powershellgallery.com/api/v2/package/Harden-Windows-Security"
-    Write-Host "2. PÉGALO en esta carpeta: $CurrentDir"
-    Write-Host "3. Vuelve a ejecutar este script."
-    Write-Host "--------------------------------------------------------"
+    Write-Host "ERROR: Module package (.nupkg / .zip) not found in current directory." -ForegroundColor Red
+    Write-Host "Please download the verified module from PowerShell Gallery or GitHub releases:"
+    Write-Host "  https://www.powershellgallery.com/api/v2/package/Harden-Windows-Security"
+    Write-Host "Save the file to: $CurrentDir and re-run this script."
     exit 1
 }
 
-Write-Host "Paquete encontrado: $($Package.Name)" -ForegroundColor Green
+Write-Host "[+] Found package: $($Package.Name)" -ForegroundColor Green
 
-# --- 3. EXTRACCIÓN ---
-Write-Host "Procesando..." -ForegroundColor Cyan
+# --- 3. EXTRACTION & UNBLOCK ---
+Write-Host "[*] Extracting package..." -ForegroundColor Cyan
 if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force }
 New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 
-# Si es .nupkg, lo tratamos como zip
 $ZipSource = $Package.FullName
 if ($Package.Extension -eq ".nupkg") {
-    $ZipSource = "$TempDir\renamed_package.zip"
+    $ZipSource = "$TempDir\package.zip"
     Copy-Item $Package.FullName -Destination $ZipSource
 }
 
 Expand-Archive -Path $ZipSource -DestinationPath $TempDir -Force
 
-# --- 4. INSTALACIÓN ---
-# Buscar el .psd1 (Manifiesto) dentro de lo descomprimido
 $Manifest = Get-ChildItem -Path $TempDir -Filter "Harden-Windows-Security.psd1" -Recurse | Select-Object -First 1
-
 if (-not $Manifest) {
-    Throw "CRÍTICO: El archivo descargado NO es un módulo válido (no tiene .psd1). ¿Seguro que bajaste el link correcto?"
+    Throw "CRITICAL: Valid module manifest (.psd1) not found inside package archive."
 }
 
-Write-Host "Instalando módulo en el sistema..." -ForegroundColor Cyan
+Write-Host "[*] Installing module to user scope: $InstallPath" -ForegroundColor Cyan
 if (Test-Path $InstallPath) { Remove-Item $InstallPath -Recurse -Force }
 New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
 
 Copy-Item -Path "$($Manifest.DirectoryName)\*" -Destination $InstallPath -Recurse -Force
-
-# Desbloquear
 Get-ChildItem -Path $InstallPath -Recurse | Unblock-File
 
-# --- 5. EJECUCIÓN ---
-Write-Host "Cargando módulo..." -ForegroundColor Cyan
+# --- 4. EXECUTION ---
+Write-Host "[*] Loading module into session..." -ForegroundColor Cyan
 $env:PSModulePath = "$env:ProgramFiles\WindowsPowerShell\Modules;$env:PSModulePath"
 
 try {
     Import-Module Harden-Windows-Security -Force
-}
-catch {
+} catch {
     Import-Module "$InstallPath\Harden-Windows-Security.psd1" -Force
 }
 
 if (-not (Get-Command "Protect-WindowsSecurity" -ErrorAction SilentlyContinue)) {
-    Throw "El módulo se instaló pero el comando falló al cargar."
+    Throw "Module loaded but Protect-WindowsSecurity command is unavailable."
 }
 
 $categories = @(
@@ -92,20 +120,17 @@ $categories = @(
     "WindowsNetworking", "ProcessMitigations"
 )
 
-Write-Host ">>> EJECUTANDO PROTECCIÓN EN 5 SEGUNDOS <<<" -ForegroundColor Green -BackgroundColor Black
-Start-Sleep -Seconds 5
-
-# Ir al directorio instalado para asegurar assets
 Push-Location $InstallPath
-
 try {
     if ($AuditOnly) {
-        Protect-WindowsSecurity -Categories $categories -Operation "Confirm" -LogPath "C:\Logs"
+        Write-Host "[*] Running verification pass (AuditOnly / Confirm)..." -ForegroundColor Green
+        Protect-WindowsSecurity -Categories $categories -Operation "Confirm" -LogPath $LogPath
+    } else {
+        Write-Host "[!] Enforcing defensive baselines across 13 categories..." -ForegroundColor Yellow
+        Protect-WindowsSecurity -Categories $categories -Operation "Protect" -LogPath $LogPath -Verbose
     }
-    else {
-        Protect-WindowsSecurity -Categories $categories -Operation "Protect" -LogPath "C:\Logs" -Verbose
-    }
-}
-finally {
+} finally {
     Pop-Location
 }
+
+Write-Host "`n[+] Operation completed. Check audit logs in $LogPath" -ForegroundColor Cyan
